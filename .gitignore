@@ -27,8 +27,12 @@ caption_debug.log
 # Project specific
 images/*
 captions/*
+SysPrompts/*
+Datasets/*
 !images/.gitkeep
 !captions/.gitkeep
+!SysPrompts/.gitkeep
+!Datasets/.gitkeep
 
 # Virtual environment
 .venv/

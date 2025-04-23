@@ -1,6 +1,6 @@
 import os
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 from PIL import Image, ImageTk
 import zipfile
 from typing import Dict, Tuple
@@ -17,7 +17,10 @@ from datetime import datetime
 class CaptionEditorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Dog Painting Caption Editor")
+        self.root.title("Image Caption Editor")
+        
+        # Make the window resizable
+        self.root.resizable(True, True)
         
         # Configuration
         self.images_dir = "images"
@@ -25,13 +28,10 @@ class CaptionEditorApp:
         self.thumbnail_size = (200, 200)
         self.progress_file = "caption_progress.json"
         
-        # Create a style for the filename entry
-        style = ttk.Style()
-        style.configure(
-            'Filename.TEntry',
-            fieldbackground='#f0f0f0',  # Light gray background
-            borderwidth=0,              # No border
-        )
+        # Style constants
+        self.ACTIVE_BORDER_COLOR = "#2ecc71"  # Bright green
+        self.INACTIVE_BORDER_COLOR = "#e0e0e0"  # Light gray
+        self.BORDER_WIDTH = 2
         
         # Queue for thread communication
         self.caption_queue = queue.Queue()
@@ -46,10 +46,10 @@ class CaptionEditorApp:
             openai.api_key = self.openai_key
         
         # Store references to avoid garbage collection
-        self.thumbnail_refs: Dict[str, ImageTk.PhotoImage] = {}
-        self.caption_widgets: Dict[str, scrolledtext.ScrolledText] = {}
-        self.caption_frames: Dict[str, tk.Frame] = {}
-        self.original_captions: Dict[str, str] = {}
+        self.thumbnail_refs = {}
+        self.caption_widgets = {}
+        self.caption_frames = {}
+        self.original_captions = {}
         self.current_active_frame = None
         
         # Progress tracking
@@ -58,11 +58,10 @@ class CaptionEditorApp:
         # Bind window close event
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
-        # Create main frame with scrollbar
+        # Create main scrollable container
         self.main_frame = ttk.Frame(root)
         self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Create canvas and scrollbar
         self.canvas = tk.Canvas(self.main_frame)
         self.scrollbar = ttk.Scrollbar(self.main_frame, orient=tk.VERTICAL, command=self.canvas.yview)
         self.scrollable_frame = ttk.Frame(self.canvas)
@@ -82,16 +81,60 @@ class CaptionEditorApp:
         # Add mousewheel scrolling
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         
-        # Remove ttk styles as we'll use tk.Frame instead
-        self.ACTIVE_BORDER_COLOR = "#2ecc71"  # Bright green
-        self.INACTIVE_BORDER_COLOR = "#e0e0e0"  # Light gray
-        self.BORDER_WIDTH = 2
+        # Default user prompt template
+        self.default_user_prompt = (
+            "Provide a raw caption with these elements in a flowing, comma-separated format:\n"
+            "1. Subject type\n"
+            "2. Pose/Action\n"
+            "3. Key details\n"
+            "4. Style\n"
+            "5. Setting\n"
+            "6. View angle\n\n"
+            "OUTPUT FORMAT:\n"
+            "Write the caption directly with no prefixes or quotes. Start with the subject and end with the view angle.\n\n"
+            "YOUR TURN - CAPTION ONLY:"
+        )
         
-        # Create control panel
-        self.create_control_panel()
+        # Create prompt management section
+        prompt_frame = ttk.LabelFrame(self.scrollable_frame, text="Prompt Template", padding="5")
+        prompt_frame.pack(fill=tk.X, padx=5, pady=5)
         
-        # Create progress bar and status label
-        self.progress_frame = ttk.Frame(self.root)
+        # User prompt text area
+        self.user_prompt = scrolledtext.ScrolledText(prompt_frame, height=8, width=80, wrap=tk.WORD)
+        self.user_prompt.pack(fill=tk.X, padx=5, pady=5)
+        self.user_prompt.insert("1.0", self.default_user_prompt)
+        
+        # Prompt file management buttons
+        button_frame = ttk.Frame(prompt_frame)
+        button_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(button_frame, text="Load Prompt", command=self.load_system_prompt).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Save Prompt", command=self.save_system_prompt).pack(side=tk.LEFT, padx=5)
+        
+        # Generate All button
+        generate_frame = ttk.Frame(self.scrollable_frame)
+        generate_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.generate_btn = ttk.Button(
+            generate_frame, 
+            text="Generate All Captions", 
+            command=self.generate_captions
+        )
+        self.generate_btn.pack(pady=5)
+        
+        # Images and captions container
+        self.images_frame = ttk.Frame(self.scrollable_frame)
+        self.images_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Bottom buttons
+        bottom_frame = ttk.Frame(self.scrollable_frame)
+        bottom_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Button(bottom_frame, text="Clear All", command=self.clear_all_captions).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_frame, text="Save Changes", command=self.save_changes).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_frame, text="Export Zip", command=self.export_zip).pack(side=tk.LEFT, padx=5)
+        
+        # Progress bar and status label
+        self.progress_frame = ttk.Frame(root)
         self.progress_frame.pack(fill=tk.X, padx=10, pady=5)
         
         self.status_label = ttk.Label(self.progress_frame, text="")
@@ -101,11 +144,69 @@ class CaptionEditorApp:
         self.progress_bar = ttk.Progressbar(self.progress_frame, variable=self.progress_var, maximum=100)
         self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
+        # Add size grip to bottom-right corner
+        size_grip = ttk.Sizegrip(root)
+        size_grip.pack(side=tk.RIGHT, anchor=tk.SE)
+        
         # Load images and captions
         self.load_content()
         
         # Start checking for caption updates
         self.check_caption_queue()
+
+    def load_system_prompt(self):
+        """Load prompt template from file"""
+        try:
+            filename = filedialog.askopenfilename(
+                title="Load Prompt Template",
+                initialdir="SysPrompts",
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+            )
+            if not filename:  # User cancelled
+                return
+                
+            with open(filename, 'r') as f:
+                prompt_data = json.load(f)
+                self.user_prompt.delete("1.0", tk.END)
+                self.user_prompt.insert("1.0", prompt_data.get("user_prompt", self.default_user_prompt))
+            messagebox.showinfo("Success", f"Loaded prompt from {filename}")
+        except FileNotFoundError:
+            messagebox.showerror("Error", f"File {filename} not found")
+        except json.JSONDecodeError:
+            messagebox.showerror("Error", f"Invalid JSON format in {filename}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error loading prompt: {str(e)}")
+
+    def save_system_prompt(self):
+        """Save prompt template to file"""
+        try:
+            filename = filedialog.asksaveasfilename(
+                title="Save Prompt Template",
+                initialdir="SysPrompts",
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+            )
+            if not filename:  # User cancelled
+                return
+                
+            prompt_data = {
+                "system_prompt": (
+                    "You are a caption generator that follows instructions precisely. "
+                    "Output ONLY the raw caption text. "
+                    "DO NOT add any prefixes, quotes, or formatting."
+                ),
+                "user_prompt": self.user_prompt.get("1.0", tk.END.strip())
+            }
+            
+            with open(filename, 'w') as f:
+                json.dump(prompt_data, f, indent=2)
+            messagebox.showinfo("Success", f"Saved prompt to {filename}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error saving prompt: {str(e)}")
+
+    def build_prompt(self):
+        return self.user_prompt.get("1.0", tk.END.strip())
 
     def on_closing(self):
         """Handle window close event"""
@@ -115,58 +216,6 @@ class CaptionEditorApp:
                 self.root.after(1000, self.root.destroy)  # Give time for thread to clean up
         else:
             self.root.destroy()
-
-    def create_control_panel(self):
-        """Create the control panel with zip filename entry and buttons"""
-        control_panel = ttk.Frame(self.root)
-        control_panel.pack(fill=tk.X, padx=10, pady=(0, 10))
-        
-        # Left side - caption generation
-        left_panel = ttk.Frame(control_panel)
-        left_panel.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Add Generate and Clear All buttons
-        self.generate_btn = ttk.Button(
-            left_panel, 
-            text="Generate All Captions", 
-            command=lambda: self.generate_captions()
-        )
-        self.generate_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.clear_btn = ttk.Button(
-            left_panel,
-            text="Clear All",
-            command=self.clear_all_captions
-        )
-        self.clear_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Right side - export controls
-        right_panel = ttk.Frame(control_panel)
-        right_panel.pack(side=tk.RIGHT, fill=tk.X)
-        
-        ttk.Label(right_panel, text="Export filename:").pack(side=tk.LEFT, padx=(0, 5))
-        self.zip_filename = ttk.Entry(right_panel, width=30)
-        self.zip_filename.pack(side=tk.LEFT, padx=(0, 10))
-        self.zip_filename.insert(0, "dog_paintings_dataset.zip")
-        
-        ttk.Button(right_panel, text="Save Changes", command=self.save_changes).pack(side=tk.LEFT, padx=5)
-        ttk.Button(right_panel, text="Export Zip", command=self.export_zip).pack(side=tk.LEFT, padx=5)
-
-    def build_prompt(self):
-        return (
-            "Provide a raw caption with these elements in a flowing, comma-separated format:\n"
-            "1. Dog breed\n"
-            "2. Pose\n"
-            "3. Fur details\n"
-            "4. Painting style\n"
-            "5. Setting\n"
-            "6. View angle\n\n"
-            "OUTPUT FORMAT:\n"
-            "Write the caption directly with no prefixes or quotes. Start with the breed and end with the view angle.\n\n"
-            "EXAMPLE OUTPUT:\n"
-            "Golden Retriever sitting alertly, long flowing golden fur, painted in realistic style, in a garden setting, three-quarter view\n\n"
-            "YOUR TURN - CAPTION ONLY:"
-        )
 
     def set_active_frame(self, img_file):
         """Highlight the currently active frame and reset the previous one"""
@@ -195,7 +244,7 @@ class CaptionEditorApp:
     def check_caption_queue(self):
         """Check for completed captions and update the GUI"""
         try:
-            while True:
+            while True:  # Process all available messages
                 msg_type, data = self.caption_queue.get_nowait()
                 
                 if msg_type == "UPDATE_GUI":
@@ -225,8 +274,9 @@ class CaptionEditorApp:
                         # Force GUI updates
                         widget.update_idletasks()
                         self.status_label.update_idletasks()
+                        self.progress_bar.update_idletasks()
                         self.progress_frame.update_idletasks()
-                    continue
+                        self.root.update_idletasks()
                     
                 elif msg_type == "DONE":
                     print("Processing complete")
@@ -244,12 +294,10 @@ class CaptionEditorApp:
                     
                 elif msg_type == "ERROR":
                     messagebox.showerror("Error", data)
-                    continue
                     
                 elif msg_type == "STATUS":
                     self.status_label.config(text=data)
                     self.status_label.update_idletasks()
-                    continue
                     
         except queue.Empty:
             pass
@@ -424,9 +472,7 @@ class CaptionEditorApp:
                         "content": (
                             "You are a caption generator that follows instructions precisely. "
                             "Output ONLY the raw caption text. "
-                            "DO NOT add any prefixes, quotes, or formatting. "
-                            "The output should be exactly like this example: "
-                            "Golden Retriever sitting alertly, long flowing golden fur, painted in realistic style, in a garden setting, three-quarter view"
+                            "DO NOT add any prefixes, quotes, or formatting."
                         )
                     },
                     {
@@ -739,11 +785,17 @@ class CaptionEditorApp:
 
     def export_zip(self):
         """Create a zip file containing all images and their captions"""
-        zip_name = self.zip_filename.get()
-        if not zip_name.endswith('.zip'):
-            zip_name += '.zip'
-        
         try:
+            zip_name = filedialog.asksaveasfilename(
+                title="Export Dataset",
+                initialdir="Datasets",
+                defaultextension=".zip",
+                initialfile="dataset.zip",
+                filetypes=[("Zip files", "*.zip"), ("All files", "*.*")]
+            )
+            if not zip_name:  # User cancelled
+                return
+            
             with zipfile.ZipFile(zip_name, 'w') as zipf:
                 # Add images
                 for img_file in os.listdir(self.images_dir):
